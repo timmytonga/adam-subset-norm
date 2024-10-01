@@ -4,7 +4,9 @@ Memory efficient adaptive stochastic optimization for deep learning with high pr
 Train faster with less memory and no additional hyperparameter tuning!
 
 Reduces memory consumption of second moment term of Adam (adaptive step size) from $O(d)$ to $O(\sqrt{d})$. 
-where $$d$$ is the total number of parameters. See `adamw_sn.py` for the full code.
+where $$d$$ is the total number of parameters. See `adamw_sn.py` for the full implementation for 2D parameters.
+
+The figure below summarizes the algorithm and theoretical results for AdaGrad:
 
 ![Subset Norm Stepsize](imgs/subset-norm-stepsize-1.png)
 
@@ -13,7 +15,7 @@ where $$d$$ is the total number of parameters. See `adamw_sn.py` for the full co
 modify `torchrun_main.py` to use the optimizer for the pre-training experiment. Note that `run_glue.py` hasn't been modified to use `adamw_sn` yet.
 - The current version applies the subset-norm reduction to parameters of shape == 2 and reduce along with larger dimension. 
 It does not reduce 1D params due to insignificant memory saving. Additional investigation is needed for parameters shape >= 3.
-# Usage
+## Usage
 The usage is simple and is identical to AdamW.
 
 **Importing and Initializing the Optimizer**
@@ -39,9 +41,9 @@ optimizer.zero_grad()
 loss.backward()
 optimizer.step()
 ```
-# Implementation 
+## Implementation 
 AdamwSN is a simple modification of AdamW:
-```python
+```diff
 for p in group["params"]:
     grad = p.grad
     state = self.state[p]
