@@ -96,7 +96,7 @@ class AdamWSN(Optimizer):
                 beta1, beta2 = group["betas"]
 
                 # State initialization
-                if "exp_avg" not in state:
+                if "exp_avg_sq" not in state:
                     if beta1 > 0:  # if beta1 == 0 then we are using RMSProp and so no momentum term
                         # Exponential moving average of gradient values
                         state["exp_avg"] = torch.zeros_like(grad)
