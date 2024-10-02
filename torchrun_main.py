@@ -122,8 +122,9 @@ def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, 
 
     # Gather losses across all GPUs
     gathered_losses = [torch.zeros_like(total_loss) for _ in range(world_size)]
-    dist.all_gather(gathered_losses, total_loss)
-    total_loss = sum([t.item() for t in gathered_losses]) / world_size
+    if world_size > 1:
+        dist.all_gather(gathered_losses, total_loss)
+        total_loss = sum([t.item() for t in gathered_losses]) / world_size
 
     return total_loss, evaluated_on_tokens
 
