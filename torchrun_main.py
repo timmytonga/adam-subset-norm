@@ -322,8 +322,6 @@ def main(args):
             if isinstance(module, nn.Linear):
                 sn_params.append(module.weight)
                 print(f"Enable AdamwSN for module {name} of shape {module.weight.shape}.")
-            # else:
-            #     print(f"\tRegular module {name}...")
         # sn_params = [module.weight for module in model.modules() if isinstance(module, nn.Linear)]
         id_rownorm_params = [id(p) for p in sn_params]
         regular_params = [p for p in model.parameters() if id(p) not in id_rownorm_params]
