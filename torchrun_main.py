@@ -71,7 +71,8 @@ def parse_args(args):
     parser.add_argument("--update_proj_gap", type=int, default=50)
     parser.add_argument("--galore_scale", type=float, default=1.0)
     parser.add_argument("--proj_type", type=str, default="std")
-    
+    parser.add_argument("--gpu", type=int, default=0, help="set gpu index")
+
     # disable ddp, single_gpu
     parser.add_argument("--single_gpu", default=False, action="store_true")
     
@@ -132,18 +133,37 @@ def main(args):
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    assert "LOCAL_RANK" in os.environ, "torchrun should set LOCAL_RANK"
-    global_rank = int(os.environ['RANK'])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(local_rank)
+    if args.single_gpu:
+        global_rank = 0
+        local_rank = 0
+        world_size = 1
+    else:
+        assert "LOCAL_RANK" in os.environ, "torchrun should set LOCAL_RANK"
+        global_rank = int(os.environ['RANK'])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        dist.init_process_group(backend="nccl", rank=global_rank, world_size=world_size)
+
+    if args.single_gpu:
+        torch.cuda.set_device(args.gpu)
+    else:
+        torch.cuda.set_device(local_rank)
+
 
     logger.info(f"Global rank {global_rank}, local rank {local_rank}, device: {torch.cuda.current_device()}")
 
-    dist.init_process_group(backend="nccl", rank=global_rank, world_size=world_size)
-
     logger.info("Process group initialized")
-    device = f"cuda:{local_rank}"
+
+    # now set the device
+    override_gpu = os.getenv("OVERRIDE_GPU")  # this is useful for sweeping and setting the device in terminal
+    if override_gpu is not None:
+        logger.info(f"Overriding args.gpu={args.gpu} with environment variable OVERRIDE_GPU: {override_gpu}")
+        device = f"cuda:{override_gpu}"
+    else:
+        if args.single_gpu:
+            device = f"cuda:{args.gpu}"
+        else:
+            device = f"cuda:{local_rank}"
 
     if args.total_batch_size is not None:
         if args.gradient_accumulation is None:
@@ -168,7 +188,7 @@ def main(args):
         logger.info(f"{k:30} {v}")
     logger.info("*" * 40)
 
-    data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
+    data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True, trust_remote_code=True)
 
     seed_for_shuffle = 42 
     
@@ -260,7 +280,7 @@ def main(args):
         # fix tqdm visual length to 80 so that the progress bar
         # doesn't jump around when changing from external display to laptop
         pbar = tqdm(total=args.num_training_steps - update_step, desc="Update steps", ncols=80)
-    
+
     if 'galore' in args.optimizer.lower():
         # make parameters with "rank" to a single group, if param_name has "mlp" or "attn"
         galore_params = []
@@ -294,8 +314,22 @@ def main(args):
         optimizer = torch.optim.Adam(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     # Adam subset norm
     elif args.optimizer.lower() == "adamw_sn":
-        from adamw_sn import AdamWSN
-        optimizer = AdamWSN(trainable_params, lr=args.lr, weight_decay=args.weight_decay, betas=(args.adam_beta1, 0.999))
+        # from adamw_sn import AdamWSN
+        from galore_torch.AdamwSNA import AdamwSNA
+        # only do SN compression on linear modules
+        sn_params = []
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                sn_params.append(module.weight)
+                print(f"Enable AdamwSN for module {name} of shape {module.weight.shape}.")
+            # else:
+            #     print(f"\tRegular module {name}...")
+        # sn_params = [module.weight for module in model.modules() if isinstance(module, nn.Linear)]
+        id_rownorm_params = [id(p) for p in sn_params]
+        regular_params = [p for p in model.parameters() if id(p) not in id_rownorm_params]
+        param_groups = [{'params': regular_params},
+                        {'params': sn_params, 'sn': True, 'reduce_dim': "larger"}]
+        optimizer = AdamwSNA(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.adam_beta1, 0.999))
     elif args.optimizer.lower() == "galore_adamw":
         # redefine way to call galore_adamw
         optimizer = GaLoreAdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)
@@ -441,40 +475,40 @@ def main(args):
         update_step += 1
         update_time = time.time() - update_time
 
-        # save checkpoint by save_every
-        if local_step > args.gradient_accumulation and update_step % args.save_every == 0 and global_rank == 0:
-            current_model_directory = f"{args.save_dir}/model_{update_step}"
-            logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
-            os.makedirs(args.save_dir, exist_ok=True)
-            model.module.save_pretrained(current_model_directory, max_shard_size='100GB')
-
-            optimizer_checkpoint = {
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "update_step": update_step,
-                "global_step": global_step,
-                "config": run_config,
-                "wandb": wandb.run.dir,
-                "dtype": args.dtype,
-            }
-            torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
-
-            training_state_checkpoint = {
-                "global_step": global_step,
-                "update_step": update_step,
-                "tokens_seen": tokens_seen,
-                "tokens_seen_before": tokens_seen_before,
-                "update_time": update_time,
-            }
-            with open(f"{current_model_directory}/training_state.json", "w") as f:
-                json.dump(training_state_checkpoint, f, indent=4)
-                
-            # save wandb related info
-            wandb_info = {
-                "wandb_id": wandb.run.id,
-            }
-            with open(f"{args.save_dir}/wandb.json", "w") as f:
-                json.dump(wandb_info, f, indent=4)
+        # # save checkpoint by save_every
+        # if local_step > args.gradient_accumulation and update_step % args.save_every == 0 and global_rank == 0:
+        #     current_model_directory = f"{args.save_dir}/model_{update_step}"
+        #     logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
+        #     os.makedirs(args.save_dir, exist_ok=True)
+        #     model.module.save_pretrained(current_model_directory, max_shard_size='100GB')
+        #
+        #     optimizer_checkpoint = {
+        #         "optimizer": optimizer.state_dict(),
+        #         "scheduler": scheduler.state_dict(),
+        #         "update_step": update_step,
+        #         "global_step": global_step,
+        #         "config": run_config,
+        #         "wandb": wandb.run.dir,
+        #         "dtype": args.dtype,
+        #     }
+        #     torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
+        #
+        #     training_state_checkpoint = {
+        #         "global_step": global_step,
+        #         "update_step": update_step,
+        #         "tokens_seen": tokens_seen,
+        #         "tokens_seen_before": tokens_seen_before,
+        #         "update_time": update_time,
+        #     }
+        #     with open(f"{current_model_directory}/training_state.json", "w") as f:
+        #         json.dump(training_state_checkpoint, f, indent=4)
+        #
+        #     # save wandb related info
+        #     wandb_info = {
+        #         "wandb_id": wandb.run.id,
+        #     }
+        #     with open(f"{args.save_dir}/wandb.json", "w") as f:
+        #         json.dump(wandb_info, f, indent=4)
 
         # evaluation
         if update_step % args.eval_every == 0:
@@ -519,32 +553,32 @@ def main(args):
     logger.info("Training finished")
     if global_rank == 0: pbar.close()
 
-    current_model_directory = f"{args.save_dir}/model_{update_step}"
-    if global_rank == 0 and not os.path.exists(current_model_directory):
-        logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
-        os.makedirs(args.save_dir, exist_ok=True)
-        model.module.save_pretrained(current_model_directory)
-
-        optimizer_checkpoint = {
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "update_step": update_step,
-            "global_step": global_step,
-            "config": run_config,
-            "wandb": wandb.run.dir,
-            "dtype": args.dtype,
-        }
-        torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
-
-        training_state_checkpoint = {
-            "global_step": global_step,
-            "update_step": update_step,
-            "tokens_seen": tokens_seen,
-            "tokens_seen_before": tokens_seen_before,
-            "update_time": update_time,
-        }
-        with open(f"{current_model_directory}/training_state.json", "w") as f:
-            json.dump(training_state_checkpoint, f, indent=4)
+    # current_model_directory = f"{args.save_dir}/model_{update_step}"
+    # if global_rank == 0 and not os.path.exists(current_model_directory):
+    #     logger.info(f"Saving model and optimizer to {current_model_directory}, update step {update_step}")
+    #     os.makedirs(args.save_dir, exist_ok=True)
+    #     model.module.save_pretrained(current_model_directory)
+    #
+    #     optimizer_checkpoint = {
+    #         "optimizer": optimizer.state_dict(),
+    #         "scheduler": scheduler.state_dict(),
+    #         "update_step": update_step,
+    #         "global_step": global_step,
+    #         "config": run_config,
+    #         "wandb": wandb.run.dir,
+    #         "dtype": args.dtype,
+    #     }
+    #     torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
+    #
+    #     training_state_checkpoint = {
+    #         "global_step": global_step,
+    #         "update_step": update_step,
+    #         "tokens_seen": tokens_seen,
+    #         "tokens_seen_before": tokens_seen_before,
+    #         "update_time": update_time,
+    #     }
+    #     with open(f"{current_model_directory}/training_state.json", "w") as f:
+    #         json.dump(training_state_checkpoint, f, indent=4)
 
     # Final evaluation
     logger.info("Running final evaluation")

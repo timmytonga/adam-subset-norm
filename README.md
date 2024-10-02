@@ -20,13 +20,17 @@ The usage is simple and is identical to AdamW.
 
 **Importing and Initializing the Optimizer**
 
-The AdamwSN has a standard importing procedure with no additional configuration required. It uses the same hyperparameters as standard AdamW.
-
+Currently, we have only tested AdamSN on 2D Linear modules 
 ```python
 from adamw_sn import AdamwSN
 
+sn_params = [module.weight for module in model.modules() if isinstance(module, nn.Linear)]
+id_rownorm_params = [id(p) for p in sn_params]
+regular_params = [p for p in model.parameters() if id(p) not in id_rownorm_params]
+param_groups = [{'params': regular_params}, {'params': sn_params, 'sn': True}]  # enable subset-norm
+                
 # Note that one can set beta1 = 0 to use RMSProp to save even more memory
-optimizer = AdamwSN(model.parameters(), lr=0.001, betas=(beta1, beta2))
+optimizer = AdamwSN(param_groups, lr=0.001, betas=(beta1, beta2))
 ```
 
 **Training loop**
@@ -112,3 +116,17 @@ The diff shows several key modifications to the AdamW optimizer implementation:
 
 4. The rest of the optimization step (including step size calculation and parameter update) remains unchanged.
 
+## Reproducing LLaMA pretraining on C4 results
+For AdamSN, we can run the following command:
+```
+torchrun torchrun_main.py --model_config configs/llama_60m.json --lr 5e-2 --batch_size 128 --total_batch_size 512 --num_training_steps 10000 --weight_decay 0 --dtype bfloat16 --eval_every 1000 --optimizer adamw_sn --scheduler cosine --warmup_steps 1000 --grad_clipping 1.0
+```
+
+Surprisingly, the same hyperparameters also work for larger models: learning rate 0.05, warmup step 10%, etc. So you can simply change 
+`--model_config configs/llama_60m.json` to `--model_config configs/llama_130m.json` or `--model_config configs/llama_350m.json` to use on larger models. 
+
+For RMSPropSN (which is AdamwSN but with beta1 set to 0 to save even more memory), we can run the following to reproduce the results from the paper:
+```
+ torchrun torchrun_main.py --model_config=configs/llama_60m.json --adam_beta1=0 --lr=0.01 --scheduler=cosine --batch_size=128 --total_batch_size=512 --num_training_steps=10000 --weight_decay=0 --dtype=bfloat16 --eval_every=1000 --warmup_steps=1000 --optimizer=adamw_sn --grad_clipping=1.0
+```
+Similarly, the same learning rate works well for larger model. Note that RMSPropSN will only use the subset-norm state for only $O(\sqrt{d})$ memory consumption in total (no state for momentum term). 

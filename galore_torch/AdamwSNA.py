@@ -8,11 +8,25 @@ from torch import nn
 from torch.optim import Optimizer
 
 from transformers.utils.versions import require_version
+from .galore_projector import GaLoreProjector
 
 
-class AdamWSN(Optimizer):
+def get_reduce_dim(shape, reduce_dim: str):
+    if reduce_dim == '0':
+        return 0
+    if reduce_dim == '1':
+        return 1
+    assert len(shape) == 2, "invalid shape: only work with 2D params for now"
+    if reduce_dim == 'larger':
+        return 0 if shape[0] >= shape[1] else 1
+    if reduce_dim == 'smaller':
+        return 0 if shape[0] <= shape[1] else 1
+
+
+class AdamwSNA(Optimizer):
     """
-    For paramters that
+    - Row norm for compressing step size
+    - Parameter sharing for momentum term
 
     Parameters:
         params (`Iterable[nn.parameter.Parameter]`):
@@ -84,50 +98,56 @@ class AdamWSN(Optimizer):
 
                 if "step" not in state:
                     state["step"] = 0
-                if "sn" in group and "reduce_dim" not in state:
-                    state["reduce_dim"] = 0 if grad.shape[0] >= grad.shape[1] else 1
 
-                # Subset Norm
-                if "sn" in group:
-                    second_moment_update = torch.norm(grad, dim=(1 - state["reduce_dim"]))
+                # reduce grad to norm for learning rate estimation
+                if "reduce_dim" in group and len(grad.shape) == 2:  # this means we are reducing the row
+                    norm_dim = 1 - get_reduce_dim(grad.shape, group["reduce_dim"])
+                    # adaptive step size state
+                    update_grad = torch.norm(grad, dim=norm_dim)
+                    # momentum state
+                    proj_grad = torch.mean(grad, dim=norm_dim)
                 else:
-                    second_moment_update = grad
-
-                beta1, beta2 = group["betas"]
+                    update_grad = grad
+                    proj_grad = grad
 
                 # State initialization
                 if "exp_avg" not in state:
-                    if beta1 > 0:  # if beta1 == 0 then we are using RMSProp and so no momentum term
-                        # Exponential moving average of gradient values
-                        state["exp_avg"] = torch.zeros_like(grad)
+                    # Exponential moving average of gradient values
+                    state["exp_avg"] = torch.zeros_like(proj_grad)
                     # Exponential moving average of squared gradient values
-                    state["exp_avg_sq"] = torch.zeros_like(second_moment_update)
+                    state["exp_avg_sq"] = torch.zeros_like(update_grad)
 
-                exp_avg_sq = state["exp_avg_sq"]
+                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+                beta1, beta2 = group["betas"]
 
                 state["step"] += 1
 
-                # Momentum term: Adds if else to handle RMSProp
-                if beta1 > 0:
-                    exp_avg = state["exp_avg"]
-                    exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
+                # now get the numerator for adam step
+                if "reduce_dim" in group:
+                    # in place for mul because reuse next step but not add
+                    if get_reduce_dim(grad.shape, group["reduce_dim"]) == 0:  # broadcast rows
+                        numerator = exp_avg.mul_(beta1)[:, None] + (1.0 - beta1)*grad
+                    else:  # broadcast columns
+                        numerator = exp_avg.mul_(beta1)[None, :] + (1.0 - beta1)*grad
+                    # update momentum after the fact
+                    exp_avg.add_(proj_grad, alpha=(1.0 - beta1))
                 else:
-                    exp_avg = grad
+                    exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
+                    numerator = exp_avg
 
-                # Second moment term: Subset norm update
-                exp_avg_sq.mul_(beta2).addcmul_(second_moment_update, second_moment_update, value=1.0 - beta2)
+                # denominator: same as adamwRN
+                exp_avg_sq.mul_(beta2).addcmul_(update_grad, update_grad, value=1.0 - beta2)
                 denom = exp_avg_sq.sqrt().add_(group["eps"])
 
-                # Compute update grad step
-                if "sn" in group:
-                    if state["reduce_dim"] == 0:  # broadcast rows
-                        norm_grad = exp_avg / denom[:, None]
+                # compute norm gradient
+                if "reduce_dim" in group and len(grad.shape) == 2:  # this means we are reducing the row
+                    if get_reduce_dim(grad.shape, group["reduce_dim"]) == 0:  # broadcast rows
+                        norm_grad = numerator / denom[:, None]
                     else:  # broadcast cols
-                        norm_grad = exp_avg / denom[None, :]
+                        norm_grad = numerator / denom[None, :]
                 else:  # standard
-                    norm_grad = exp_avg / denom
+                    norm_grad = numerator / denom
 
-                # Bias correction and step size
                 step_size = group["lr"]
                 if group["correct_bias"]:  # No bias correction for Bert
                     bias_correction1 = 1.0 - beta1 ** state["step"]
