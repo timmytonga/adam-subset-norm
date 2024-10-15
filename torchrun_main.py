@@ -63,6 +63,8 @@ def parse_args(args):
     parser.add_argument("--name", type=str, default="test")
     parser.add_argument("--grad_clipping", type=float, default=0.0)
     parser.add_argument("--adam_beta1", type=float, default=0.9)
+    parser.add_argument("--subset_size", default=-1, type=int,
+                        help="subset size for adamwSNG since we can do custom step size")
     # beta1 for adafactor
     parser.add_argument("--beta1", type=float, default=0.0)
     
@@ -323,6 +325,9 @@ def main(args):
         param_groups = [{'params': regular_params},
                         {'params': sn_params, 'sn': True, 'reduce_dim': "larger"}]
         optimizer = AdamWSN(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.adam_beta1, 0.999))
+    elif args.optimizer == "adamw_sng":
+        from adamw_sng import AdamWSN
+        optimizer = AdamWSN(trainable_params, lr=args.lr, weight_decay=args.weight_decay, subset_size=args.subset_size)
     elif args.optimizer.lower() == "galore_adamw":
         # redefine way to call galore_adamw
         optimizer = GaLoreAdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)

@@ -60,16 +60,15 @@ for p in group["params"]:
 +   if "reduce_dim" not in state and len(grad.shape) == 2:
 +       state["reduce_dim"] = 0 if grad.shape[0] >= grad.shape[1] else 1
 +   if len(grad.shape) == 2:
-+       second_moment_update = torch.norm(grad, dim=(1 - state["reduce_dim"]))
++       second_moment_update = torch.sum(grad**2, dim=(1 - state["reduce_dim"]), keepdim=True)
 +   else:
 +       second_moment_update = grad
 
     # State initialization
     if "exp_avg" not in state:
--       state["exp_avg"] = torch.zeros_like(p)
+        state["exp_avg"] = torch.zeros_like(p)
 -       state["exp_avg_sq"] = torch.zeros_like(p)
-+       state["exp_avg"] = torch.zeros_like(grad)
-+       state["exp_avg_sq"] = torch.zeros_like(second_moment_update)
++       state["exp_avg_sq"] = torch.zeros_like(second_moment_update)  # smaller size
 
     exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
 
@@ -77,19 +76,12 @@ for p in group["params"]:
 
     exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
 -   exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-+   exp_avg_sq.mul_(beta2).addcmul_(second_moment_update, second_moment_update, value=1.0 - beta2)
++   exp_avg_sq.mul_(beta2).add_(second_moment_update, alpha=1.0 - beta2)
 
     denom = exp_avg_sq.sqrt().add_(group["eps"])
 
--   norm_grad = exp_avg / denom
-+   # Compute update grad step
-+   if len(grad.shape) == 2:  # work with 2D params for now
-+       if state["reduce_dim"] == 0:  # broadcast rows
-+           norm_grad = exp_avg / denom[:, None]
-+       else:  # broadcast cols
-+           norm_grad = exp_avg / denom[None, :]
-+   else:  # standard
-+       norm_grad = exp_avg / denom
+    norm_grad = exp_avg / denom  # broadcast division
+
 
     step_size = group["lr"]
     if group["correct_bias"]:  # No bias correction for Bert
@@ -110,12 +102,8 @@ The diff shows several key modifications to the AdamW optimizer implementation:
 
 2. Exponential Moving Average State Initialization and Update:
    - The initialization of `exp_avg_sq` is modified. It uses `torch.zeros_like(second_moment_update)`. This reduces the memory for 2D parameters from $O(d)$ to $O(\sqrt{d})$.
-   - The update for `exp_avg_sq` now uses `second_moment_update` instead of `grad` in the `addcmul_` operation when compared to AdamW.
+   - The update for `exp_avg_sq` now uses `second_moment_update` instead of `grad` when compared to AdamW.
 
-3. Broadcasting division for `norm_grad` computation
-   - For `norm_grad` computation, we must broadcast the state `exp_avg_sq` correctly according to the reduced dimension.
-
-4. The rest of the optimization step (including step size calculation and parameter update) remains unchanged.
 
 ## Reproducing LLaMA pretraining on C4 results
 For AdamSN, we can run the following command:
