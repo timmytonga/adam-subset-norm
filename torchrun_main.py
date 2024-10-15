@@ -85,7 +85,7 @@ def parse_args(args):
 @torch.no_grad()
 def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size):
     _time = time.time()
-    val_data = datasets.load_dataset("c4", "en", split="validation", streaming=True) #DGX
+    val_data = datasets.load_dataset("allenai/c4", "en", split="validation", streaming=True)  #DGX
     val_data = val_data.shuffle(seed=42)
     logger.info(f"Loaded validation dataset in {time.time() - _time:.2f} seconds")
 
@@ -122,8 +122,9 @@ def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, 
 
     # Gather losses across all GPUs
     gathered_losses = [torch.zeros_like(total_loss) for _ in range(world_size)]
-    dist.all_gather(gathered_losses, total_loss)
-    total_loss = sum([t.item() for t in gathered_losses]) / world_size
+    if world_size > 1:
+        dist.all_gather(gathered_losses, total_loss)
+        total_loss = sum([t.item() for t in gathered_losses]) / world_size
 
     return total_loss, evaluated_on_tokens
 
@@ -188,7 +189,7 @@ def main(args):
         logger.info(f"{k:30} {v}")
     logger.info("*" * 40)
 
-    data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True, trust_remote_code=True)
+    data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
 
     seed_for_shuffle = 42 
     
@@ -314,20 +315,14 @@ def main(args):
         optimizer = torch.optim.Adam(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     # Adam subset norm
     elif args.optimizer.lower() == "adamw_sn":
-        # from adamw_sn import AdamWSN
-        from galore_torch.AdamwSNA import AdamwSNA
+        from adamw_sn import AdamWSN
         # only do SN compression on linear modules
-        sn_params = []
-        for name, module in model.named_modules():
-            if isinstance(module, nn.Linear):
-                sn_params.append(module.weight)
-                print(f"Enable AdamwSN for module {name} of shape {module.weight.shape}.")
-        # sn_params = [module.weight for module in model.modules() if isinstance(module, nn.Linear)]
+        sn_params = [module.weight for module in model.modules() if isinstance(module, nn.Linear)]
         id_rownorm_params = [id(p) for p in sn_params]
         regular_params = [p for p in model.parameters() if id(p) not in id_rownorm_params]
         param_groups = [{'params': regular_params},
                         {'params': sn_params, 'sn': True, 'reduce_dim': "larger"}]
-        optimizer = AdamwSNA(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.adam_beta1, 0.999))
+        optimizer = AdamWSN(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.adam_beta1, 0.999))
     elif args.optimizer.lower() == "galore_adamw":
         # redefine way to call galore_adamw
         optimizer = GaLoreAdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)
