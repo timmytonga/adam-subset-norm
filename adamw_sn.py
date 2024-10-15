@@ -89,7 +89,7 @@ class AdamWSN(Optimizer):
 
                 # Subset Norm
                 if "sn" in group:
-                    second_moment_update = torch.norm(grad, dim=(1 - state["reduce_dim"]))
+                    second_moment_update = torch.sum(grad**2, dim=(1 - state["reduce_dim"]), keepdim=True)
                 else:
                     second_moment_update = grad
 
@@ -97,10 +97,9 @@ class AdamWSN(Optimizer):
 
                 # State initialization
                 if "exp_avg_sq" not in state:
-                    if beta1 > 0:  # if beta1 == 0 then we are using RMSProp and so no momentum term
-                        # Exponential moving average of gradient values
+                    if beta1 > 0:
                         state["exp_avg"] = torch.zeros_like(grad)
-                    # Exponential moving average of squared gradient values
+                    # if beta1 == 0 then we are using RMSProp and so no momentum term
                     state["exp_avg_sq"] = torch.zeros_like(second_moment_update)
 
                 exp_avg_sq = state["exp_avg_sq"]
@@ -111,21 +110,13 @@ class AdamWSN(Optimizer):
                 if beta1 > 0:
                     exp_avg = state["exp_avg"]
                     exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
+                    numerator = exp_avg
                 else:
-                    exp_avg = grad
+                    numerator = grad
 
                 # Second moment term: Subset norm update
-                exp_avg_sq.mul_(beta2).addcmul_(second_moment_update, second_moment_update, value=1.0 - beta2)
+                exp_avg_sq.mul_(beta2).add_(second_moment_update, alpha=1.0 - beta2)
                 denom = exp_avg_sq.sqrt().add_(group["eps"])
-
-                # Compute update grad step
-                if "sn" in group:
-                    if state["reduce_dim"] == 0:  # broadcast rows
-                        norm_grad = exp_avg / denom[:, None]
-                    else:  # broadcast cols
-                        norm_grad = exp_avg / denom[None, :]
-                else:  # standard
-                    norm_grad = exp_avg / denom
 
                 # Bias correction and step size
                 step_size = group["lr"]
@@ -134,15 +125,7 @@ class AdamWSN(Optimizer):
                     bias_correction2 = 1.0 - beta2 ** state["step"]
                     step_size = step_size * math.sqrt(bias_correction2) / bias_correction1
 
-                p.add_(norm_grad, alpha=-step_size)
-
-                # Just adding the square of the weights to the loss function is *not*
-                # the correct way of using L2 regularization/weight decay with Adam,
-                # since that will interact with the m and v parameters in strange ways.
-                #
-                # Instead we want to decay the weights in a manner that doesn't interact
-                # with the m/v parameters. This is equivalent to adding the square
-                # of the weights to the loss with plain (non-momentum) SGD.
+                p.addcdiv_(numerator, denom, value=-step_size)
                 # Add weight decay at the end (fixed version)
                 if group["weight_decay"] > 0.0:
                     p.add_(p, alpha=(-group["lr"] * group["weight_decay"]))

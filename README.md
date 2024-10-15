@@ -9,7 +9,8 @@ where $$d$$ is the total number of parameters. See `adamw_sn.py` for the full im
 The figure below summarizes the algorithm and theoretical results for AdaGrad:
 
 ![Subset Norm Stepsize](imgs/subset-norm-stepsize-1.png)
-
+![Memory comparison](imgs/gpu_memory_usage_enhanced.png)
+![Eval Perplexity](imgs/eval_perplexity.pdf)
 **Important**:
 -  This repo is built on top of [GaLore](https://github.com/jiaweizzhao/GaLore) where we add `adamw_sn.py` and 
 modify `torchrun_main.py` to use the optimizer for the pre-training experiment. Note that `run_glue.py` hasn't been modified to use `adamw_sn` yet.
