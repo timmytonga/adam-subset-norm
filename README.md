@@ -112,7 +112,7 @@ for p in group["params"]:
 +   if len(grad.shape) == 2:
 +       second_moment_update = torch.sum(grad**2, dim=(1 - state["reduce_dim"]), keepdim=True)
 +   else:
-+       second_moment_update = grad
++       second_moment_update = grad**2
 
     # State initialization
     if "exp_avg" not in state:

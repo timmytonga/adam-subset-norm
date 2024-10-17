@@ -91,7 +91,7 @@ class AdamWSN(Optimizer):
                 if "sn" in group:
                     second_moment_update = torch.sum(grad**2, dim=(1 - state["reduce_dim"]), keepdim=True)
                 else:
-                    second_moment_update = grad
+                    second_moment_update = grad**2
 
                 beta1, beta2 = group["betas"]
 
