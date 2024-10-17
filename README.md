@@ -10,16 +10,66 @@ The figure below summarizes the algorithm and theoretical results for AdaGrad:
 
 ![Subset Norm Stepsize](imgs/subset-norm-stepsize-1.png)
 ![Memory comparison](imgs/gpu_memory_usage_enhanced.png)
-![Eval Perplexity](imgs/eval_perplexity.pdf)
 **Important**:
 -  This repo is built on top of [GaLore](https://github.com/jiaweizzhao/GaLore) where we add `adamw_sn.py` and 
 modify `torchrun_main.py` to use the optimizer for the pre-training experiment. Note that `run_glue.py` hasn't been modified to use `adamw_sn` yet.
 - The current version applies the subset-norm reduction to parameters of shape == 2 and reduce along with larger dimension. 
 It does not reduce 1D params due to insignificant memory saving. Additional investigation is needed for parameters shape >= 3.
-## Usage
-The usage is simple and is identical to AdamW.
+## Adamw_SNG usage
+This is the main AdamwSN General version where the user can specify the subset size. There are two ways you can use the optimizer:
+(1) restrict the subset-norm step size to nn.Linear modules only or (2) perform the subset-norm step size on all parameters.
+See the 2 sections below for usage in each case. 
 
-**Importing and Initializing the Optimizer**
+In the paper, the best results are obtained when the SN step size is restricted to nn.Linear modules only: better convergence than Adam while using significantly less memory.
+However, this restriction could be tough on distributed setup like FSDP, so we can perform subset-norm on all parameters which is a lot simpler. 
+For the second case, the performance is about the same as Adam (but worse than case 1) in our experiments.
+
+Finally, the learning rate for these optimizers with the recommended subset size is typically 10 times larger than you would set for Adam (coordinate-wise).
+So for example, if you typically train AdamW with lr of 1e-4 then you could try AdamwSN with a lr of 1e-3 to start the hyperparameter search.  
+
+### (1) Recommended: Perform SN compression on nn.Linear modules only
+For transformers, compression seems the most effective when applied to nn.Linear modules only, which makes up the vast majority of the parameters of transformers.
+One can use the AdamwSNG optimizer for linear modules only as follows: 
+```python
+from adamw_sng import AdamwSN
+
+# suppose we parse args for `lr`, `weight_decay`, and `subset_size`
+# suppose we have defined a `model` of type torch.nn.Module
+
+sn_params = [module.weight for module in model.modules() if isinstance(module, nn.Linear)]
+id_rownorm_params = [id(p) for p in sn_params]
+regular_params = [p for p in model.parameters() if id(p) not in id_rownorm_params]
+param_groups = [{'params': regular_params, 'sn': False},
+                {'params': sn_params, 'sn': True}]
+optimizer = AdamwSN(param_groups, lr=args.lr, weight_decay=args.weight_decay,
+                    betas=(0.9, 0.999), subset_size=args.subset_size)
+```
+
+### (2) Generic case: subset size for arbitrary parameter or FSDP flattened concatenated
+When your model contains other parameters or when partitioning the parameters into param_groups is not possible or efficient (such as in FSDP training), 
+one can use the optimizer as a standard PyTorch optimizer:
+```python
+from adamw_sng import AdamwSN
+
+# suppose we parse args for `lr`, `weight_decay`, and `subset_size`
+# suppose we have defined a `model` of type torch.nn.Module
+optimizer = AdamwSN(model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+                    betas=(0.9, 0.999), subset_size=args.subset_size)
+```
+
+This seems to perform slightly worse than the Linear modules only version above (still similarly to vanilla Adam however).
+However, with the speed gain in training, we can train for slightly longer to attain the same result. 
+
+### Recommended subset size
+If you do not know what subset_size to set, a good rule of thumb is to set it as $$d/2$$ where $$d$$ is the hidden dimension of your transformer model.
+For example, the hidden dimension is 4096 for Llama 7B and so a good subset_size could be 2048. 
+
+You can leave the `subset_size` argument to its default value of -1 to use the recommended subset size as stated above. 
+
+## Adamw_SN simple partition scheme from paper usage
+This version of AdamwSN requires no additional hyperparameter on top of Adam.  
+
+**Importing the Optimizer**
 
 Currently, we have only tested AdamSN on 2D Linear modules 
 ```python

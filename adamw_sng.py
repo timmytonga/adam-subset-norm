@@ -10,19 +10,20 @@ from torch.optim import Optimizer
 from transformers.utils.versions import require_version
 
 
-def closest_divisor_to_sqrt(N):
-    if N <= 0:
-        raise ValueError("N must be a positive integer")
-
-    sqrt_N = math.isqrt(N)
-
+def closest_smaller_divisor_of_N_to_k(N, k):
+    if N % k == 0:
+        return k
+    if N <= 1 or k <= 1:
+        raise ValueError
     # Start from sqrt_N and work downwards
-    for i in range(sqrt_N, 0, -1):
+    for i in range(k, 0, -1):
         if N % i == 0:
+            print(f"Choosing subset-size: {k} is not a divisor of total numel {N}. "
+                  f"Picking {i} that is the closest smaller divisor.")
             return i
 
 
-class AdamWSN(Optimizer):
+class AdamwSN(Optimizer):
     """
     For paramters that
 
@@ -74,6 +75,9 @@ class AdamWSN(Optimizer):
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias,
                     "subset_size": subset_size}
         super().__init__(params, defaults)
+        for group in self.param_groups:
+            if "sn" not in group:
+                group["sn"] = True  # default is perform subset norm
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -102,15 +106,17 @@ class AdamWSN(Optimizer):
 
                 # Subset Norm
                 numel = grad.numel()
-                subset_size = group["subset_size"]
-                if subset_size != -1:
-                    assert numel % subset_size == 0, f"Subset_size should be selected to divide the total number of elements of the param"
-                    reshaped_grad = grad.view(numel//subset_size, subset_size)
+                if group["sn"]:
+                    if "subset_size" not in state:
+                        if group["subset_size"] != -1:
+                            assert group["subset_size"] > 0
+                            state["subset_size"] = closest_smaller_divisor_of_N_to_k(numel, group["subset_size"])
+                        else:  # default is sqrt
+                            state["subset_size"] = closest_smaller_divisor_of_N_to_k(numel, math.sqrt(numel))
+                    reshaped_grad = grad.view(numel // state["subset_size"], state["subset_size"])
+                    second_moment_update = torch.sum(reshaped_grad**2, dim=1, keepdim=True)
                 else:
-                    subset_size = closest_divisor_to_sqrt(numel)
-                    reshaped_grad = grad.view(numel // subset_size, subset_size)
-
-                second_moment_update = torch.sum(reshaped_grad**2, dim=1, keepdim=True)
+                    second_moment_update = grad**2
                 beta1, beta2 = group["betas"]
 
                 # State initialization
@@ -131,7 +137,7 @@ class AdamWSN(Optimizer):
                 else:
                     exp_avg = grad
 
-                # Second moment term: Subset norm update
+                # Second moment term
                 exp_avg_sq.mul_(beta2).add_(second_moment_update, alpha=1.0 - beta2)
                 denom = exp_avg_sq.sqrt().add_(group["eps"])
 
@@ -143,8 +149,11 @@ class AdamWSN(Optimizer):
                     step_size = step_size * math.sqrt(bias_correction2) / bias_correction1
 
                 # Compute update grad step
-                numerator = exp_avg.view(numel // subset_size, subset_size)
-                norm_grad = (numerator/denom).reshape(p.shape)
+                if group["sn"]:
+                    numerator = exp_avg.view(numel // state["subset_size"], state["subset_size"])
+                    norm_grad = (numerator/denom).reshape(p.shape)
+                else:
+                    norm_grad = exp_avg / denom
 
                 # step
                 p.add_(norm_grad, alpha=-step_size)
