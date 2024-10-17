@@ -1,6 +1,5 @@
 # copy dependencies from transformers/optimization.py
 import math
-import warnings
 from typing import Callable, Iterable, Tuple
 
 import torch
@@ -10,20 +9,20 @@ from torch.optim import Optimizer
 from transformers.utils.versions import require_version
 
 
-def closest_smaller_divisor_of_N_to_k(N, k):
-    if N % k == 0:
+def closest_smaller_divisor_of_n_to_k(n: int, k: int) -> int:
+    if n % k == 0:
         return k
-    if N <= 1 or k <= 1:
+    if n <= 1 or k <= 1:
         raise ValueError
     # Start from sqrt_N and work downwards
-    for i in range(k, 0, -1):
-        if N % i == 0:
-            print(f"Choosing subset-size: {k} is not a divisor of total numel {N}. "
+    for i in range(int(k), 0, -1):
+        if n % i == 0:
+            print(f"Choosing subset-size: {k} is not a divisor of total numel {n}. "
                   f"Picking {i} that is the closest smaller divisor.")
-            return i
+            return int(i)
 
 
-class AdamwSN(Optimizer):
+class AdamWSN(Optimizer):
     """
     For paramters that
 
@@ -40,8 +39,6 @@ class AdamwSN(Optimizer):
             Decoupled weight decay to apply.
         correct_bias (`bool`, *optional*, defaults to `True`):
             Whether or not to correct bias in Adam (for instance, in Bert TF repository they use `False`).
-        no_deprecation_warning (`bool`, *optional*, defaults to `False`):
-            A flag used to disable the deprecation warning (set to `True` to disable the warning).
     """
 
     def __init__(
@@ -52,16 +49,8 @@ class AdamwSN(Optimizer):
             eps: float = 1e-6,
             weight_decay: float = 0.0,
             correct_bias: bool = True,
-            no_deprecation_warning: bool = False,
-            subset_size: int = -1  # -1 means sqrt(d) params grouping
+            subset_size: int = -2  # -k means sqrt(d)/k params grouping
     ):
-        if not no_deprecation_warning:
-            warnings.warn(
-                "This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch"
-                " implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this"
-                " warning",
-                FutureWarning,
-            )
         require_version("torch>=1.5.0")  # add_ with alpha
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr} - should be >= 0.0")
@@ -71,13 +60,9 @@ class AdamwSN(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0)")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
-        assert subset_size > 0 or subset_size == -1
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias,
                     "subset_size": subset_size}
         super().__init__(params, defaults)
-        for group in self.param_groups:
-            if "sn" not in group:
-                group["sn"] = True  # default is perform subset norm
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -108,11 +93,11 @@ class AdamwSN(Optimizer):
                 numel = grad.numel()
                 if group["sn"]:
                     if "subset_size" not in state:
-                        if group["subset_size"] != -1:
-                            assert group["subset_size"] > 0
-                            state["subset_size"] = closest_smaller_divisor_of_N_to_k(numel, group["subset_size"])
+                        if group["subset_size"] > 0:
+                            state["subset_size"] = closest_smaller_divisor_of_n_to_k(numel, group["subset_size"])
                         else:  # default is sqrt
-                            state["subset_size"] = closest_smaller_divisor_of_N_to_k(numel, math.sqrt(numel))
+                            div = abs(int(group["subset_size"]))
+                            state["subset_size"] = closest_smaller_divisor_of_n_to_k(numel, int(math.sqrt(numel) / div))
                     reshaped_grad = grad.view(numel // state["subset_size"], state["subset_size"])
                     second_moment_update = torch.sum(reshaped_grad**2, dim=1, keepdim=True)
                 else:
